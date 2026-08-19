@@ -1,0 +1,50 @@
+name: Sync logs Cativa -> Make
+
+on:
+  schedule:
+    # 12:00 no horario de Brasilia (UTC-3) = 15:00 UTC
+    - cron: "0 15 * * *"
+  workflow_dispatch: {}   # permite rodar manualmente pela aba Actions do GitHub
+
+permissions:
+  contents: write   # necessário pra commitar o processed_emails.json de volta
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Rodar o robo
+        env:
+          CATIVA_EMAIL: ${{ secrets.CATIVA_EMAIL }}
+          CATIVA_PASSWORD: ${{ secrets.CATIVA_PASSWORD }}
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          HEADLESS: "true"
+        run: python scrape_cativa_logs.py
+
+      - name: Salvar screenshots de debug (se der erro)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: "*.png"
+          if-no-files-found: ignore
+
+      - name: Salvar processed_emails.json atualizado
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add processed_emails.json
+          git diff --quiet --cached || git commit -m "Atualiza e-mails processados"
+          git push
