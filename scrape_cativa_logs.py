@@ -33,7 +33,7 @@ from pathlib import Path
 import requests
 from playwright.sync_api import sync_playwright
 
-CATIVA_LOGIN_URL = "https://comunidade.campeduc.com/login"
+CATIVA_LOGIN_URL = "https://comunidade.campeduc.com/"
 CATIVA_WEBHOOKS_URL = "https://comunidade.campeduc.com/admin/webhooklisteners"
 WEBHOOK_ROW_TEXT = "Integração - Guru"
 
@@ -87,12 +87,32 @@ def login_and_get_logs_text(playwright):
             "Não encontrei o campo de e-mail no login. "
             "Veja debug_login_email_not_found.png e ajuste os seletores."
         )
+
     if not fill_first_match(password_selectors, password):
-        page.screenshot(path="debug_login_password_not_found.png")
-        raise RuntimeError(
-            "Não encontrei o campo de senha no login. "
-            "Veja debug_login_password_not_found.png e ajuste os seletores."
-        )
+        # Fluxo em duas etapas (comum em apps tipo Circle): o campo de senha
+        # só aparece depois de confirmar o e-mail com um botão "Continuar".
+        continue_texts = re.compile(r"continuar|próximo|next|avan", re.I)
+        clicked_continue = False
+        for btn in page.locator("button").all():
+            try:
+                text = btn.inner_text(timeout=500)
+            except Exception:
+                continue
+            if continue_texts.search(text or ""):
+                btn.click()
+                clicked_continue = True
+                break
+        if clicked_continue:
+            page.wait_for_timeout(1500)
+            page.wait_for_load_state("networkidle")
+
+        if not fill_first_match(password_selectors, password):
+            page.screenshot(path="debug_login_password_not_found.png")
+            raise RuntimeError(
+                "Não encontrei o campo de senha no login (mesmo depois de tentar "
+                "clicar em 'Continuar'). Veja debug_login_password_not_found.png "
+                "e ajuste os seletores."
+            )
 
     submit_texts = re.compile(r"entrar|login|acessar|continuar", re.I)
     clicked = False
