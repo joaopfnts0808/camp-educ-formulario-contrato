@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
 Robo diario: entra no admin da Cativa, abre o log do webhook "Integracao - Guru"
-(evento "Criar usuario"), extrai os pagamentos recebidos e joga as linhas novas
-numa Google Sheet (a mesma que ja usamos: colunas Nome, Email, CPF, Telefone,
-CEP, Estado, Cidade, Rua, Numero, Complemento, Bairro, FormaPagamento).
+(evento "Criar usuario"), extrai os pagamentos recebidos e manda pro Make (que
+escreve na Google Sheet) só os que ainda não tinham sido enviados antes.
 
 Nao mexe em NADA no painel da Cativa alem de logar e clicar em "Ver logs" --
 nao ativa/desativa webhook, nao cria nada.
@@ -12,12 +11,13 @@ Credenciais NUNCA ficam neste arquivo. Tudo vem de variaveis de ambiente
 (no GitHub Actions, isso sao "Secrets" do repositorio).
 
 Variaveis de ambiente necessarias:
-  CATIVA_EMAIL              - email de login no admin da Cativa
-  CATIVA_PASSWORD           - senha de login
-  GOOGLE_SERVICE_ACCOUNT_JSON - conteudo (JSON completo, em uma linha) da
-                                 chave de uma conta de servico do Google com
-                                 acesso de Editor na planilha
-  SHEET_ID                  - ID da planilha (o trecho entre /d/ e /edit na URL)
+  CATIVA_EMAIL      - email de login no admin da Cativa
+  CATIVA_PASSWORD   - senha de login
+  MAKE_WEBHOOK_URL  - URL do webhook do Make que recebe os registros
+
+Controle de duplicidade: mantém um arquivo `processed_emails.json` no
+repositório (o workflow do GitHub Actions faz commit dele de volta depois de
+cada execução). Só manda pro Make e-mails que ainda não estão nesse arquivo.
 
 Uso local (teste antes de confiar no agendamento):
   HEADLESS=false python scrape_cativa_logs.py
@@ -28,19 +28,16 @@ import os
 import re
 import sys
 from datetime import datetime
+from pathlib import Path
 
+import requests
 from playwright.sync_api import sync_playwright
-import gspread
-from google.oauth2.service_account import Credentials
 
 CATIVA_LOGIN_URL = "https://comunidade.campeduc.com/login"
 CATIVA_WEBHOOKS_URL = "https://comunidade.campeduc.com/admin/webhooklisteners"
 WEBHOOK_ROW_TEXT = "Integração - Guru"
 
-SHEET_HEADERS = [
-    "Nome", "Email", "CPF", "Telefone", "CEP", "Estado", "Cidade",
-    "Rua", "Numero", "Complemento", "Bairro", "FormaPagamento",
-]
+STATE_FILE = Path(__file__).parent / "processed_emails.json"
 
 PAYMENT_METHOD_MAP = {
     "pix": "PIX",
@@ -66,8 +63,6 @@ def login_and_get_logs_text(playwright):
     log("Abrindo tela de login...")
     page.goto(CATIVA_LOGIN_URL, wait_until="networkidle")
 
-    # Tenta algumas variações comuns de seletor -- ajuste aqui se a Cativa
-    # mudar o formulário de login.
     email_selectors = [
         "input[type=email]",
         "input[name=email]",
@@ -99,7 +94,6 @@ def login_and_get_logs_text(playwright):
             "Veja debug_login_password_not_found.png e ajuste os seletores."
         )
 
-    # Botão de submit: tenta por texto comum, senão o primeiro botão do form
     submit_texts = re.compile(r"entrar|login|acessar|continuar", re.I)
     clicked = False
     for btn in page.locator("button").all():
@@ -119,7 +113,6 @@ def login_and_get_logs_text(playwright):
 
     page.goto(CATIVA_WEBHOOKS_URL, wait_until="networkidle")
 
-    # Acha a linha da tabela que contém o texto do webhook alvo
     row = page.locator(f"text={WEBHOOK_ROW_TEXT}").first
     if row.count() == 0:
         page.screenshot(path="debug_row_not_found.png")
@@ -128,14 +121,12 @@ def login_and_get_logs_text(playwright):
             "Veja debug_row_not_found.png."
         )
 
-    # Sobe até o container da linha (tenta algumas alturas de ancestral)
     row_container = row
     for _ in range(4):
         candidate = row_container.locator("xpath=..")
         if candidate.count() > 0:
             row_container = candidate
 
-    # Ícones clicáveis na linha: 0=copiar URL, 1=Ver logs, 2=toggle, 3=editar, 4=apagar
     clickable = row_container.locator("svg, button, [role=button], input[type=checkbox]")
     if clickable.count() < 2:
         page.screenshot(path="debug_row_icons_not_found.png")
@@ -148,7 +139,6 @@ def login_and_get_logs_text(playwright):
     clickable.nth(1).click()
     page.wait_for_timeout(2000)
 
-    # Pode abrir modal na mesma página OU uma nova aba/página
     context = page.context
     if len(context.pages) > 1:
         logs_page = context.pages[-1]
@@ -169,7 +159,6 @@ def login_and_get_logs_text(playwright):
 
 
 def extract_json_blobs(raw_text):
-    """Extrai todos os objetos JSON `{...}` soltos no meio do texto da tela de logs."""
     blobs = []
     depth = 0
     start = None
@@ -191,8 +180,7 @@ def extract_json_blobs(raw_text):
     return blobs
 
 
-def blob_to_row(blob):
-    """Converte um payload da Guru (evento subscription) numa linha da planilha."""
+def blob_to_entry(blob):
     subscriber = blob.get("subscriber") or {}
     if not subscriber.get("email"):
         return None
@@ -203,64 +191,67 @@ def blob_to_row(blob):
 
     forma = PAYMENT_METHOD_MAP.get(blob.get("payment_method", ""), "")
 
-    return [
-        subscriber.get("name", ""),
-        subscriber.get("email", ""),
-        subscriber.get("doc", ""),
-        telefone,
-        subscriber.get("address_zip_code", ""),
-        subscriber.get("address_state", ""),
-        subscriber.get("address_city", ""),
-        subscriber.get("address", ""),
-        subscriber.get("address_number", ""),
-        subscriber.get("address_comp", ""),
-        subscriber.get("address_district", ""),
-        forma,
-    ]
+    return {
+        "nome": subscriber.get("name", ""),
+        "email": subscriber.get("email", ""),
+        "cpf": subscriber.get("doc", ""),
+        "telefone": telefone,
+        "cep": subscriber.get("address_zip_code", ""),
+        "estado": subscriber.get("address_state", ""),
+        "cidade": subscriber.get("address_city", ""),
+        "rua": subscriber.get("address", ""),
+        "numero": subscriber.get("address_number", ""),
+        "complemento": subscriber.get("address_comp", ""),
+        "bairro": subscriber.get("address_district", ""),
+        "forma_pagamento": forma,
+    }
 
 
-def get_sheet():
-    creds_json = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
-    sheet_id = os.environ["SHEET_ID"]
-    info = json.loads(creds_json)
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_info(info, scopes=scopes)
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(sheet_id)
-    return sh.sheet1
+def load_processed_emails():
+    if STATE_FILE.exists():
+        return set(json.loads(STATE_FILE.read_text(encoding="utf-8")))
+    return set()
+
+
+def save_processed_emails(emails):
+    STATE_FILE.write_text(
+        json.dumps(sorted(emails), ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def main():
+    webhook_url = os.environ["MAKE_WEBHOOK_URL"]
+
     with sync_playwright() as playwright:
         raw_text = login_and_get_logs_text(playwright)
 
     blobs = extract_json_blobs(raw_text)
     log(f"Encontrados {len(blobs)} registros no log.")
 
-    ws = get_sheet()
-    existing = ws.get_all_values()
-    if not existing:
-        ws.append_row(SHEET_HEADERS)
-        existing = [SHEET_HEADERS]
+    processed = load_processed_emails()
+    log(f"{len(processed)} e-mail(s) já processados em execuções anteriores.")
 
-    existing_emails = {row[1] for row in existing[1:] if len(row) > 1}
-
-    new_rows = []
+    entries = []
     for blob in blobs:
-        row = blob_to_row(blob)
-        if row is None:
+        entry = blob_to_entry(blob)
+        if entry is None:
             continue
-        email = row[1]
-        if email in existing_emails:
+        if entry["email"] in processed:
             continue
-        new_rows.append(row)
-        existing_emails.add(email)
+        entries.append(entry)
+        processed.add(entry["email"])
 
-    if new_rows:
-        ws.append_rows(new_rows)
-        log(f"Adicionadas {len(new_rows)} linha(s) nova(s) na planilha.")
-    else:
-        log("Nenhuma linha nova pra adicionar hoje.")
+    if not entries:
+        log("Nenhum registro novo. Nada pra enviar.")
+        return
+
+    log(f"Enviando {len(entries)} registro(s) novo(s) pro Make...")
+    resp = requests.post(webhook_url, json={"entries": entries}, timeout=30)
+    resp.raise_for_status()
+    log(f"Make respondeu {resp.status_code}.")
+
+    save_processed_emails(processed)
+    log("processed_emails.json atualizado.")
 
 
 if __name__ == "__main__":
