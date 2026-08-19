@@ -53,7 +53,7 @@
 <body>
 <div class="card">
   <h1>Dados do contrato</h1>
-  <p class="subtitle">Preencha com as informações do cliente. Ao enviar, o contrato e o link de assinatura são gerados automaticamente.</p>
+  <p class="subtitle">Os campos em destaque já vêm preenchidos automaticamente. Complete só RG, data de nascimento, tipo de contrato e valores — ao enviar, o contrato e o link de assinatura são gerados na hora.</p>
 
   <form id="form">
     <fieldset>
@@ -169,8 +169,17 @@
   const WEBHOOK_URL = "https://hook.us2.make.com/8mavzpeh88438tbwtxlv5p79j2fe50ax";
 
   const params = new URLSearchParams(window.location.search);
-  ["nome_completo", "email", "telefone"].forEach(id => {
-    if (params.get(id)) document.getElementById(id).value = params.get(id);
+  const camposAutomaticos = [
+    "nome_completo", "email", "telefone", "cpf",
+    "cep", "estado", "cidade", "rua", "bairro", "numero_endereco", "complemento",
+    "forma_pagamento"
+  ];
+  camposAutomaticos.forEach(id => {
+    const el = document.getElementById(id);
+    if (el && params.get(id)) {
+      el.value = params.get(id);
+      el.style.background = "#f4f0fb";
+    }
   });
 
   // CPF: formata como 000.000.000-00 enquanto digita
