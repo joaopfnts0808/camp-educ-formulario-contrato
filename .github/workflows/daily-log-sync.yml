@@ -12,6 +12,7 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 20   # trava de segurança: nunca deixa a run ficar presa por horas
     steps:
       - uses: actions/checkout@v4
 
@@ -20,6 +21,8 @@ jobs:
           python-version: "3.11"
 
       - name: Instalar dependencias
+        env:
+          DEBIAN_FRONTEND: noninteractive   # evita apt travar esperando confirmação interativa
         run: |
           pip install -r requirements.txt
           playwright install --with-deps chromium
