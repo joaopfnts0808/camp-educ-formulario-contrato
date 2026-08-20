@@ -33,7 +33,7 @@ from pathlib import Path
 import requests
 from playwright.sync_api import sync_playwright
 
-CATIVA_LOGIN_URL = "https://comunidade.campeduc.com/"
+CATIVA_LOGIN_URL = "https://comunidade.campeduc.com/auth/login"
 CATIVA_WEBHOOKS_URL = "https://comunidade.campeduc.com/admin/webhooklisteners"
 WEBHOOK_ROW_TEXT = "Integração - Guru"
 
@@ -72,6 +72,7 @@ def login_and_get_logs_text(playwright):
         "input[type=password]",
         "input[name=password]",
     ]
+    submit_texts = re.compile(r"entrar|login|acessar|continuar|próximo|next|avan", re.I)
 
     def fill_first_match(selectors, value):
         for sel in selectors:
@@ -81,6 +82,25 @@ def login_and_get_logs_text(playwright):
                 return True
         return False
 
+    def click_submit_button():
+        for btn in page.locator("button").all():
+            try:
+                text = btn.inner_text(timeout=500)
+            except Exception:
+                continue
+            if submit_texts.search(text or ""):
+                btn.click()
+                return True
+        submit_btn = page.locator("button[type=submit]").first
+        if submit_btn.count() > 0:
+            submit_btn.click()
+            return True
+        return False
+
+    # Login em duas etapas: primeiro só o e-mail + "Entrar", depois a senha
+    # aparece na mesma tela + "Entrar" de novo.
+
+    # Passo 1: e-mail
     if not fill_first_match(email_selectors, email):
         page.screenshot(path="debug_login_email_not_found.png")
         raise RuntimeError(
@@ -88,48 +108,33 @@ def login_and_get_logs_text(playwright):
             "Veja debug_login_email_not_found.png e ajuste os seletores."
         )
 
+    if not click_submit_button():
+        page.screenshot(path="debug_login_step1_button_not_found.png")
+        raise RuntimeError(
+            "Não encontrei o botão pra confirmar o e-mail (1o passo do login). "
+            "Veja debug_login_step1_button_not_found.png."
+        )
+
+    page.wait_for_timeout(1500)
+    page.wait_for_load_state("networkidle")
+
+    # Passo 2: senha (só aparece depois do e-mail confirmado)
     if not fill_first_match(password_selectors, password):
-        # Fluxo em duas etapas (comum em apps tipo Circle): o campo de senha
-        # só aparece depois de confirmar o e-mail com um botão "Continuar".
-        continue_texts = re.compile(r"continuar|próximo|next|avan", re.I)
-        clicked_continue = False
-        for btn in page.locator("button").all():
-            try:
-                text = btn.inner_text(timeout=500)
-            except Exception:
-                continue
-            if continue_texts.search(text or ""):
-                btn.click()
-                clicked_continue = True
-                break
-        if clicked_continue:
-            page.wait_for_timeout(1500)
-            page.wait_for_load_state("networkidle")
+        page.screenshot(path="debug_login_password_not_found.png")
+        raise RuntimeError(
+            "Não encontrei o campo de senha no login (2o passo, depois do e-mail). "
+            "Veja debug_login_password_not_found.png e ajuste os seletores."
+        )
 
-        if not fill_first_match(password_selectors, password):
-            page.screenshot(path="debug_login_password_not_found.png")
-            raise RuntimeError(
-                "Não encontrei o campo de senha no login (mesmo depois de tentar "
-                "clicar em 'Continuar'). Veja debug_login_password_not_found.png "
-                "e ajuste os seletores."
-            )
-
-    submit_texts = re.compile(r"entrar|login|acessar|continuar", re.I)
-    clicked = False
-    for btn in page.locator("button").all():
-        try:
-            text = btn.inner_text(timeout=500)
-        except Exception:
-            continue
-        if submit_texts.search(text or ""):
-            btn.click()
-            clicked = True
-            break
-    if not clicked:
-        page.locator("button[type=submit]").first.click()
+    if not click_submit_button():
+        page.screenshot(path="debug_login_step2_button_not_found.png")
+        raise RuntimeError(
+            "Não encontrei o botão pra confirmar a senha (2o passo do login). "
+            "Veja debug_login_step2_button_not_found.png."
+        )
 
     page.wait_for_load_state("networkidle")
-    log("Login feito (ou pelo menos tentado). Indo pra tela de webhooks...")
+    log("Login feito. Indo pra tela de webhooks...")
 
     page.goto(CATIVA_WEBHOOKS_URL, wait_until="networkidle")
 
