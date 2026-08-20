@@ -74,7 +74,15 @@ def login_and_get_logs_text(playwright):
     ]
     submit_texts = re.compile(r"entrar|login|acessar|continuar|próximo|next|avan", re.I)
 
-    def fill_first_match(selectors, value):
+    def fill_first_match(selectors, value, wait_ms=10000):
+        # SPA: a rede pode ficar "idle" antes do React terminar de montar a
+        # tela, entao espera o campo aparecer de verdade em vez de checar na
+        # hora.
+        combined = ", ".join(selectors)
+        try:
+            page.locator(combined).first.wait_for(state="visible", timeout=wait_ms)
+        except Exception:
+            pass
         for sel in selectors:
             loc = page.locator(sel).first
             if loc.count() > 0:
@@ -197,21 +205,34 @@ def login_and_get_logs_text(playwright):
 
     log("Clicando em 'Ver logs'...")
     clickable.nth(1).click()
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(1500)
 
     context = page.context
-    if len(context.pages) > 1:
-        logs_page = context.pages[-1]
-        logs_page.wait_for_load_state("networkidle")
-        text = logs_page.inner_text("body")
-    else:
-        text = page.inner_text("body")
+    log_page = context.pages[-1] if len(context.pages) > 1 else page
+    log_page.wait_for_load_state("networkidle")
+
+    # O modal abre na hora, mas o "Dados recebidos" de cada entrada e' um
+    # fetch assincrono por item que demora alguns segundos pra popular tudo.
+    # Espera ativamente ate aparecer pelo menos um "{" (inicio de JSON) em
+    # vez de confiar num tempo fixo.
+    text = log_page.inner_text("body")
+    for _ in range(10):
+        if "{" in text:
+            break
+        log_page.wait_for_timeout(1000)
+        text = log_page.inner_text("body")
 
     if "Dados recebidos" not in text and "webhook_type" not in text:
-        page.screenshot(path="debug_logs_view_unexpected.png")
+        log_page.screenshot(path="debug_logs_view_unexpected.png")
         log(
             "Aviso: o texto capturado não parece ter os logs esperados. "
             "Salvei debug_logs_view_unexpected.png pra você conferir."
+        )
+    elif "{" not in text:
+        log_page.screenshot(path="debug_logs_no_json.png")
+        log(
+            "Aviso: achei 'Dados recebidos' mas nenhum JSON populou depois de "
+            "~10s de espera. Salvei debug_logs_no_json.png pra conferir."
         )
 
     browser.close()
