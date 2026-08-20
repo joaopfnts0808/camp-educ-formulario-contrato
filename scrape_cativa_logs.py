@@ -134,6 +134,22 @@ def login_and_get_logs_text(playwright):
         )
 
     page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(1000)
+
+    if "login" in page.url.lower():
+        # Ainda na tela de login: a autenticação não colou (senha errada,
+        # captcha, ou algum aviso de erro). Loga o texto da tela pra ver o motivo.
+        page.screenshot(path="debug_login_failed.png")
+        body_text = page.inner_text("body")
+        log(f"URL apos tentar logar: {page.url}")
+        log("Ainda na tela de login. Texto visivel da pagina:")
+        log(body_text[:1000])
+        raise RuntimeError(
+            "O login não completou (continua em uma URL de /login/auth). "
+            "Veja debug_login_failed.png e o texto logado acima — provavelmente "
+            "a senha está incorreta ou tem uma etapa extra (captcha, 2FA)."
+        )
+
     log("Login feito. Indo pra tela de webhooks...")
 
     page.goto(CATIVA_WEBHOOKS_URL, wait_until="networkidle")
