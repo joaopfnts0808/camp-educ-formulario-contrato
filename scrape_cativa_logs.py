@@ -139,11 +139,23 @@ def login_and_get_logs_text(playwright):
     page.goto(CATIVA_WEBHOOKS_URL, wait_until="networkidle")
 
     row = page.locator(f"text={WEBHOOK_ROW_TEXT}").first
+    try:
+        row.wait_for(state="visible", timeout=8000)
+    except Exception:
+        pass
+
     if row.count() == 0:
         page.screenshot(path="debug_row_not_found.png")
+        Path("debug_row_not_found.html").write_text(page.content(), encoding="utf-8")
+        body_text = page.inner_text("body")
+        log(f"URL atual: {page.url}")
+        log(f"Titulo da pagina: {page.title()}")
+        log("Texto visivel da pagina (primeiros 1500 caracteres):")
+        log(body_text[:1500])
         raise RuntimeError(
             f"Não encontrei a linha '{WEBHOOK_ROW_TEXT}'. "
-            "Veja debug_row_not_found.png."
+            "Veja debug_row_not_found.png / debug_row_not_found.html e o texto "
+            "logado acima."
         )
 
     row_container = row
